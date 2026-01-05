@@ -216,14 +216,23 @@ async def resolve_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ {name} set as {acc_type}")
 
 # ================= BALANCE =================
-async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    msg = (
-        f"💵 Cash: ¥{balance(user_id,'Cash')}\n"
-        f"🏦 Bank: ¥{balance(user_id,'Bank')}\n"
-        f"📱 PayPay: ¥{balance(user_id,'PayPay')}"
-    )
-    await update.message.reply_text(msg)
+
+def balance(user_id, name):
+    acc = get_account(user_id, name)
+    if not acc:
+        return 0
+    acc_id, acc_type = acc
+    cursor.execute("SELECT SUM(debit), SUM(credit) FROM journal WHERE user_id=? AND account_id=?", (user_id, acc_id))
+    result = cursor.fetchone()
+    total_debit = result[0] if result[0] else 0
+    total_credit = result[1] if result[1] else 0
+
+    if acc_type.lower() == "asset" or acc_type.lower() == "expense":
+        return total_debit - total_credit
+    elif acc_type.lower() == "income":
+        return total_credit - total_debit
+    else:
+        return total_debit - total_credit  # fallback
 
 # ================= TODAY COMMAND =================
 async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):

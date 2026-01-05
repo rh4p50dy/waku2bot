@@ -1,93 +1,238 @@
-from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
+import os
 import sqlite3
 from datetime import datetime
-import os
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    ContextTypes, filters
+)
 
 TOKEN = "8514654568:AAGEND_i5FVNLKND88GE1vEfPr0zSEZeDfI"
 
-conn = sqlite3.connect("expenses.db", check_same_thread=False)
+# ================= DATABASE =================
+conn = sqlite3.connect("accounting.db", check_same_thread=False)
 cursor = conn.cursor()
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS expenses (
+cursor.executescript("""
+CREATE TABLE IF NOT EXISTS accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
-    title TEXT,
-    amount INTEGER,
-    date TEXT,
-    month TEXT,
-    year TEXT
-)
+    name TEXT,
+    type TEXT
+);
+
+CREATE TABLE IF NOT EXISTS journal (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    account_id INTEGER,
+    debit INTEGER,
+    credit INTEGER,
+    date TEXT
+);
+
+CREATE TABLE IF NOT EXISTS pending (
+    user_id INTEGER,
+    name TEXT,
+    source TEXT,
+    amount INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS setup_state (
+    user_id INTEGER PRIMARY KEY,
+    step INTEGER
+);
 """)
 conn.commit()
 
-def save_expense(user_id, title, amount):
-    now = datetime.now()
-    cursor.execute("""
-        INSERT INTO expenses (user_id, title, amount, date, month, year)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (
-        user_id,
-        title,
-        amount,
-        now.strftime("%Y-%m-%d"),
-        now.strftime("%Y-%m"),
-        now.strftime("%Y")
-    ))
+# ================= HELPERS =================
+def get_account(user_id, name):
+    cursor.execute(
+        "SELECT id, type FROM accounts WHERE user_id=? AND LOWER(name)=LOWER(?)",
+        (user_id, name)
+    )
+    return cursor.fetchone()
+
+def create_account(user_id, name, acc_type):
+    cursor.execute(
+        "INSERT INTO accounts (user_id, name, type) VALUES (?, ?, ?)",
+        (user_id, name.capitalize(), acc_type)
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+def post_entry(user_id, debit_acc, credit_acc, amount):
+    date = datetime.now().strftime("%Y-%m-%d")
+
+    cursor.execute(
+        "INSERT INTO journal VALUES (NULL, ?, ?, ?, 0, ?)",
+        (user_id, debit_acc, amount, date)
+    )
+    cursor.execute(
+        "INSERT INTO journal VALUES (NULL, ?, ?, 0, ?, ?)",
+        (user_id, credit_acc, amount, date)
+    )
     conn.commit()
 
+def balance(user_id, name):
+    acc = get_account(user_id, name)
+    if not acc:
+        return 0
+    acc_id = acc[0]
+    cursor.execute("""
+        SELECT COALESCE(SUM(debit-credit),0)
+        FROM journal WHERE user_id=? AND account_id=?
+    """, (user_id, acc_id))
+    return cursor.fetchone()[0]
+
+# ================= START & SETUP =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+
+    for acc in ["Cash", "Bank", "PayPay"]:
+        if not get_account(user_id, acc):
+            create_account(user_id, acc, "Asset")
+
+    cursor.execute(
+        "INSERT OR IGNORE INTO setup_state VALUES (?, 1)",
+        (user_id,)
+    )
+    conn.commit()
+
     await update.message.reply_text(
-        "💸 Expense Tracker Bot\nSend: Coffee 195\nCommands: /today /month /advice"
+        "👋 Welcome!\n\nHow much CASH do you have now?"
     )
 
-async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.message.from_user.id
-    today = datetime.now().strftime("%Y-%m-%d")
-    cursor.execute("SELECT SUM(amount) FROM expenses WHERE user_id=? AND date=?", (uid, today))
-    total = cursor.fetchone()[0] or 0
-    await update.message.reply_text(f"📅 Today: ¥{total}")
-
-async def month(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.message.from_user.id
-    month = datetime.now().strftime("%Y-%m")
-    cursor.execute("SELECT SUM(amount) FROM expenses WHERE user_id=? AND month=?", (uid, month))
-    total = cursor.fetchone()[0] or 0
-    await update.message.reply_text(f"📊 Month: ¥{total}")
-
-async def advice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.message.from_user.id
-    month = datetime.now().strftime("%Y-%m")
-    cursor.execute("""
-        SELECT title, SUM(amount) FROM expenses
-        WHERE user_id=? AND month=?
-        GROUP BY title ORDER BY SUM(amount) DESC LIMIT 1
-    """, (uid, month))
-    top = cursor.fetchone()
-    if top:
-        await update.message.reply_text(
-            f"💡 Most spending: {top[0]} (¥{top[1]})\nTry reducing it."
-        )
-    else:
-        await update.message.reply_text("No data yet.")
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
     text = update.message.text.strip()
-    parts = text.split()
-    if len(parts) < 2 or not parts[-1].isdigit():
-        await update.message.reply_text("Format: Coffee 195")
+
+    cursor.execute("SELECT step FROM setup_state WHERE user_id=?", (user_id,))
+    step = cursor.fetchone()
+
+    if not step or not text.isdigit():
         return
 
-    amount = int(parts[-1])
-    title = " ".join(parts[:-1])
-    save_expense(update.message.from_user.id, title, amount)
-    await update.message.reply_text(f"✅ Saved {title}: ¥{amount}")
+    amount = int(text)
+    step = step[0]
 
+    if step == 1:
+        post_entry(user_id, get_account(user_id, "Cash")[0], get_account(user_id, "Cash")[0], amount)
+        cursor.execute("UPDATE setup_state SET step=2 WHERE user_id=?", (user_id,))
+        await update.message.reply_text("🏦 How much BANK balance?")
+    elif step == 2:
+        post_entry(user_id, get_account(user_id, "Bank")[0], get_account(user_id, "Bank")[0], amount)
+        cursor.execute("UPDATE setup_state SET step=3 WHERE user_id=?", (user_id,))
+        await update.message.reply_text("📱 How much PayPay balance?")
+    elif step == 3:
+        post_entry(user_id, get_account(user_id, "PayPay")[0], get_account(user_id, "PayPay")[0], amount)
+        cursor.execute("DELETE FROM setup_state WHERE user_id=?", (user_id,))
+        await update.message.reply_text("✅ Setup complete! Start typing expenses.")
+
+    conn.commit()
+
+# ================= MAIN INPUT =================
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    text = update.message.text.strip().lower().split()
+
+    if len(text) < 2:
+        return
+
+    # WITHDRAWAL
+    if "withdraw" in text or "withdrawal" in text:
+        source = "bank"
+        amount = int(text[-1])
+        post_entry(user_id,
+                   get_account(user_id, "Cash")[0],
+                   get_account(user_id, "Bank")[0],
+                   amount)
+        await update.message.reply_text("🏦 Withdrawal recorded")
+        return
+
+    # PAYPAY CHARGE
+    if "charge" in text:
+        amount = int(text[-1])
+        post_entry(user_id,
+                   get_account(user_id, "PayPay")[0],
+                   get_account(user_id, "Bank")[0],
+                   amount)
+        await update.message.reply_text("📱 PayPay charged")
+        return
+
+    name = text[0].capitalize()
+    source = text[1].capitalize()
+    amount = int(text[-1])
+
+    acc = get_account(user_id, name)
+
+    if not acc:
+        cursor.execute("INSERT INTO pending VALUES (?, ?, ?, ?)",
+                       (user_id, name, source, amount))
+        conn.commit()
+
+        keyboard = ReplyKeyboardMarkup(
+            [["Expense", "Income"]], one_time_keyboard=True, resize_keyboard=True
+        )
+        await update.message.reply_text(
+            f'❓ Is "{name}" Expense or Income?',
+            reply_markup=keyboard
+        )
+        return
+
+    acc_id, acc_type = acc
+    source_id = get_account(user_id, source)[0]
+
+    if acc_type == "Expense":
+        post_entry(user_id, acc_id, source_id, amount)
+    else:
+        post_entry(user_id, source_id, acc_id, amount)
+
+    await update.message.reply_text(f"✅ {name} ¥{amount} saved")
+
+# ================= PENDING RESOLUTION =================
+async def resolve_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    choice = update.message.text.lower()
+
+    cursor.execute("SELECT * FROM pending WHERE user_id=?", (user_id,))
+    pending = cursor.fetchone()
+    if not pending:
+        return
+
+    _, name, source, amount = pending
+    acc_type = "Expense" if choice == "expense" else "Income"
+
+    acc_id = create_account(user_id, name, acc_type)
+    source_id = get_account(user_id, source)[0]
+
+    if acc_type == "Expense":
+        post_entry(user_id, acc_id, source_id, amount)
+    else:
+        post_entry(user_id, source_id, acc_id, amount)
+
+    cursor.execute("DELETE FROM pending WHERE user_id=?", (user_id,))
+    conn.commit()
+
+    await update.message.reply_text(f"✅ {name} set as {acc_type}")
+
+# ================= BALANCE =================
+async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    msg = (
+        f"💵 Cash: ¥{balance(user_id,'Cash')}\n"
+        f"🏦 Bank: ¥{balance(user_id,'Bank')}\n"
+        f"📱 PayPay: ¥{balance(user_id,'PayPay')}"
+    )
+    await update.message.reply_text(msg)
+
+# ================= RUN =================
 app = ApplicationBuilder().token(TOKEN).build()
+app.bot.delete_webhook(drop_pending_updates=True)
+
 app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("today", today))
-app.add_handler(CommandHandler("month", month))
-app.add_handler(CommandHandler("advice", advice))
+app.add_handler(CommandHandler("balance", balance_cmd))
+app.add_handler(MessageHandler(filters.Regex("^(Expense|Income)$"), resolve_pending))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_setup))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
 app.run_polling()

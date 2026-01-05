@@ -217,7 +217,7 @@ async def resolve_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= BALANCE =================
 
-def balance(user_id, name):
+def balance_cmd(user_id, name):
     acc = get_account(user_id, name)
     if not acc:
         return 0

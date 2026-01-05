@@ -4,7 +4,7 @@ import sqlite3
 from datetime import datetime
 import os
 
-TOKEN = os.getenv("8514654568:AAGEND_i5FVNLKND88GE1vEfPr0zSEZeDfI")
+TOKEN = "8514654568:AAGEND_i5FVNLKND88GE1vEfPr0zSEZeDfI"
 
 conn = sqlite3.connect("expenses.db", check_same_thread=False)
 cursor = conn.cursor()

@@ -225,12 +225,122 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg)
 
+# ================= TODAY COMMAND =================
+async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    cursor.execute("""
+        SELECT a.name, a.type, j.debit, j.credit
+        FROM journal j
+        JOIN accounts a ON j.account_id = a.id
+        WHERE j.user_id=? AND j.date=?
+        ORDER BY j.id ASC
+    """, (user_id, today))
+    rows = cursor.fetchall()
+    
+    if not rows:
+        await update.message.reply_text("No entries today.")
+        return
+
+    msg = f"📅 Entries today ({today}):\n"
+    for name, acc_type, debit, credit in rows:
+        if acc_type.lower() == "expense" or (debit > 0 and credit == 0):
+            msg += f"{name} ⬇️ {debit}\n"
+        else:
+            msg += f"{name} ⬆️ {credit}\n"
+
+    await update.message.reply_text(msg)
+
+# ================= DATE COMMAND =================
+async def date_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /date 1/4")
+        return
+
+    day, month = context.args[0].split("/")
+    year = datetime.now().year
+    date_str = f"{year}-{int(month):02d}-{int(day):02d}"
+
+    cursor.execute("""
+        SELECT a.name, a.type, j.debit, j.credit
+        FROM journal j
+        JOIN accounts a ON j.account_id = a.id
+        WHERE j.user_id=? AND j.date=?
+        ORDER BY j.id ASC
+    """, (user_id, date_str))
+    rows = cursor.fetchall()
+    
+    if not rows:
+        await update.message.reply_text(f"No entries on {date_str}.")
+        return
+
+    msg = f"📅 Entries on {date_str}:\n"
+    for name, acc_type, debit, credit in rows:
+        if acc_type.lower() == "expense" or (debit > 0 and credit == 0):
+            msg += f"{name} ⬇️ {debit}\n"
+        else:
+            msg += f"{name} ⬆️ {credit}\n"
+
+    await update.message.reply_text(msg)
+
+# ================= OVERALL MONTH COMMAND =================
+async def overall_month_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    month = datetime.now().strftime("%Y-%m")  # current month
+
+    # Income
+    cursor.execute("""
+        SELECT a.name, COALESCE(SUM(j.credit - j.debit),0)
+        FROM journal j
+        JOIN accounts a ON j.account_id = a.id
+        WHERE j.user_id=? AND a.type='Income' AND j.date LIKE ?
+        GROUP BY a.name
+    """, (user_id, month + "%"))
+    incomes = cursor.fetchall()
+
+    # Expenses
+    cursor.execute("""
+        SELECT a.name, COALESCE(SUM(j.debit - j.credit),0)
+        FROM journal j
+        JOIN accounts a ON j.account_id = a.id
+        WHERE j.user_id=? AND a.type='Expense' AND j.date LIKE ?
+        GROUP BY a.name
+    """, (user_id, month + "%"))
+    expenses = cursor.fetchall()
+
+    msg = f"🗓 Overview for {month}:\n\n💰 Income:\n"
+    total_income = 0
+    for name, amount in incomes:
+        msg += f"{name}: ¥{amount}\n"
+        total_income += amount
+    msg += f"Total Income: ¥{total_income}\n\n"
+
+    msg += "💸 Expenses:\n"
+    total_expense = 0
+    for name, amount in expenses:
+        msg += f"{name}: ¥{amount}\n"
+        total_expense += amount
+    msg += f"Total Expenses: ¥{total_expense}\n\n"
+
+    net = total_income - total_expense
+    msg += f"💵 Net Cash Flow: ¥{net}"
+
+    await update.message.reply_text(msg)
+
+# ================= ADD THESE HANDLERS =================
+
+
 # ================= RUN =================
 app = ApplicationBuilder().token(TOKEN).build()
 app.bot.delete_webhook(drop_pending_updates=True)
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("balance", balance_cmd))
+app.add_handler(CommandHandler("today", today_cmd))
+app.add_handler(CommandHandler("date", date_cmd))
+app.add_handler(CommandHandler("overall", overall_month_cmd))
 app.add_handler(MessageHandler(filters.Regex("^(Expense|Income)$"), resolve_pending))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_setup))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
